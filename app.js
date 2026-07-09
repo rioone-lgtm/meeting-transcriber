@@ -5,6 +5,8 @@ const SILENCE_FLUSH_S = 0.7;    // 無音がこの秒数続いたらセグメン
 const MAX_SEGMENT_S = 15;       // セグメント最大長
 const MIN_SEGMENT_S = 0.4;      // これより短い音声は捨てる
 const PREROLL_CHUNKS = 4;       // 発話開始前に遡って含めるチャンク数(~0.5秒)
+const INTERIM_INTERVAL_MS = 2500; // 発話中の暫定認識の間隔
+const INTERIM_MIN_S = 1.2;      // 暫定認識にかける最小の音声長
 
 const el = (id) => document.getElementById(id);
 
@@ -17,9 +19,13 @@ let streams = [];
 let segmenters = [];
 let sessionStart = 0;
 let nextId = 1;
-const pending = new Map();   // id -> { source, start }
+const pending = new Map();   // id -> { source, start, interim }
 const results = [];          // { start, source, text }
 let queueCount = 0;
+let deviceType = '';
+let interimTimer = null;
+const interimShown = new Map();    // source -> { source, start, text }
+const interimInflight = new Map(); // source -> id
 
 // ---- 無音検出でセグメントを切り出す ----
 class Segmenter {
@@ -55,6 +61,16 @@ class Segmenter {
     }
     this.time += dur;
   }
+  // 発話中のセグメントの現時点までのコピーを返す(暫定認識用)
+  snapshot() {
+    if (!this.chunks) return null;
+    const total = this.chunks.reduce((a, c) => a + c.length, 0);
+    if (total / SAMPLE_RATE < INTERIM_MIN_S) return null;
+    const audio = new Float32Array(total);
+    let offset = 0;
+    for (const c of this.chunks) { audio.set(c, offset); offset += c.length; }
+    return { audio, start: this.segmentStart };
+  }
   flush() {
     if (!this.chunks) return;
     const total = this.chunks.reduce((a, c) => a + c.length, 0);
@@ -78,6 +94,7 @@ function ensureWorker() {
     if (msg.type === 'ready') {
       workerReady = true;
       loadedModel = el('model').value;
+      deviceType = msg.device;
       if (running) updateRunningStatus();
     } else if (msg.type === 'result') {
       onResult(msg);
@@ -192,10 +209,41 @@ function warmupTranslators() {
 function onResult({ id, text, error }) {
   const meta = pending.get(id);
   pending.delete(id);
+  if (error) console.warn('transcribe error:', error);
+  if (!meta) return;
+
+  // 暫定結果: 同じセグメントの確定結果がまだ無ければグレー表示を更新
+  if (meta.interim) {
+    interimInflight.delete(meta.source);
+    const finalized = results.some((r) => r.source === meta.source && r.start === meta.start);
+    if (text && !finalized) {
+      const prev = interimShown.get(meta.source);
+      const entry = { source: meta.source, start: meta.start, text, translation: null };
+      // 同じセグメントの直前の暫定訳は引き継ぐ(新しい訳が来るまでのちらつき防止)
+      if (prev && prev.start === meta.start) entry.translation = prev.translation;
+      interimShown.set(meta.source, entry);
+      renderTranscript();
+      if (el('optTranslate').checked) {
+        translateToJa(text).then((ja) => {
+          // 確定・更新で置き換わっていた場合は適用しない
+          if (ja && interimShown.get(meta.source) === entry) {
+            entry.translation = ja;
+            renderTranscript();
+          }
+        });
+      }
+    }
+    return;
+  }
+
+  // 確定結果: 対応する暫定表示を置き換える
   queueCount = Math.max(0, queueCount - 1);
   updateRunningStatus();
-  if (error) console.warn('transcribe error:', error);
-  if (!meta || !text) return;
+  if (interimShown.get(meta.source)?.start === meta.start) {
+    interimShown.delete(meta.source);
+    renderTranscript();
+  }
+  if (!text) return;
   const entry = { start: meta.start, source: meta.source, text, translation: null };
   results.push(entry);
   results.sort((a, b) => a.start - b.start);
@@ -217,6 +265,8 @@ function clearTranscript() {
   if (!confirm('文字起こし結果をすべて消去します。よろしいですか?(保存していないテキストは失われます)')) return;
   results.length = 0;
   pending.clear(); // 認識中のセグメントもクリア後は表示しない
+  interimShown.clear();
+  interimInflight.clear();
   el('transcript').innerHTML = '<div class="empty">ここに文字起こし結果が表示されます</div>';
   el('btnDownload').disabled = true;
   el('btnClear').disabled = true;
@@ -231,9 +281,13 @@ function fmtTime(s) {
 function renderTranscript() {
   const box = el('transcript');
   box.innerHTML = '';
-  for (const r of results) {
+  const items = [
+    ...results,
+    ...[...interimShown.values()].map((v) => ({ ...v, interim: true })),
+  ].sort((a, b) => a.start - b.start);
+  for (const r of items) {
     const row = document.createElement('div');
-    row.className = 'row';
+    row.className = r.interim ? 'row interim' : 'row';
     const isMe = r.source === 'mic';
     row.innerHTML = `<span class="time">[${fmtTime(r.start)}]</span>` +
       `<span class="spk ${isMe ? 'me' : 'them'}">${isMe ? '自分' : '相手'}</span>` +
@@ -259,6 +313,21 @@ function onSegment({ source, audio, start }) {
   queueCount++;
   updateRunningStatus();
   worker.postMessage({ type: 'transcribe', id, audio, language: el('language').value }, [audio.buffer]);
+}
+
+// 発話中のセグメントを定期的に途中まで認識して暫定表示する
+// (WASMは推論が遅く確定認識を圧迫するためWebGPU時のみ)
+function interimTick() {
+  if (!running || !workerReady || deviceType !== 'WebGPU') return;
+  for (const seg of segmenters) {
+    if (interimInflight.has(seg.source)) continue;
+    const snap = seg.snapshot();
+    if (!snap) continue;
+    const id = nextId++;
+    pending.set(id, { source: seg.source, start: snap.start, interim: true });
+    interimInflight.set(seg.source, id);
+    worker.postMessage({ type: 'transcribe', id, audio: snap.audio, language: el('language').value }, [snap.audio.buffer]);
+  }
 }
 
 function setStatus(msg) { el('status').textContent = msg; }
@@ -323,6 +392,7 @@ async function start() {
 
     running = true;
     sessionStart = Date.now();
+    interimTimer = setInterval(interimTick, INTERIM_INTERVAL_MS);
     el('btnStart').style.display = 'none';
     el('btnStop').style.display = 'inline-block';
     updateRunningStatus();
@@ -346,6 +416,8 @@ function stopStreams() {
 function stop() {
   if (!running) return;
   running = false;
+  clearInterval(interimTimer);
+  interimTimer = null;
   segmenters.forEach((s) => s.flush());
   segmenters = [];
   stopStreams();
