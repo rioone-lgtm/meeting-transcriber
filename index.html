@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>会議文字起こし (ブラウザ内Whisper)</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --text: #1a202c; --sub: #64748b;
+    --accent: #2563eb; --border: #e2e8f0; --me: #059669; --them: #2563eb;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif; background: var(--bg); color: var(--text); }
+  .container { max-width: 860px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--sub); font-size: 13px; margin-bottom: 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  label { font-size: 13px; color: var(--sub); display: flex; align-items: center; gap: 4px; }
+  select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+  button { padding: 10px 18px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  #btnStart { background: var(--accent); color: #fff; }
+  #btnStop { background: #dc2626; color: #fff; display: none; }
+  #btnPreload, #btnDownload, #btnClear { background: #e2e8f0; color: var(--text); }
+  #status { font-size: 13px; color: var(--sub); margin-top: 12px; min-height: 18px; white-space: pre-line; }
+  #transStatus { font-size: 12px; color: #7c3aed; min-height: 16px; }
+  #progress { margin-top: 8px; }
+  .pbar { height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden; margin: 4px 0; }
+  .pbar > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+  .pname { font-size: 11px; color: var(--sub); }
+  #transcript { min-height: 200px; max-height: 55vh; overflow-y: auto; }
+  .row { display: flex; gap: 8px; padding: 6px 4px; border-bottom: 1px solid var(--border); font-size: 14px; line-height: 1.6; }
+  .row .time { color: var(--sub); font-size: 12px; flex-shrink: 0; padding-top: 2px; font-variant-numeric: tabular-nums; }
+  .row .spk { flex-shrink: 0; font-size: 12px; font-weight: 700; padding: 1px 8px; border-radius: 10px; align-self: flex-start; margin-top: 2px; }
+  .spk.me { color: var(--me); background: #d1fae5; }
+  .spk.them { color: var(--them); background: #dbeafe; }
+  .trans { color: #7c3aed; font-size: 13px; margin-top: 2px; padding-left: 10px; border-left: 2px solid #ddd6fe; }
+  .empty { color: var(--sub); font-size: 13px; text-align: center; padding: 40px 0; }
+  .warn { background: #fef3c7; border: 1px solid #fcd34d; color: #92400e; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
+  .hint { font-size: 12px; color: var(--sub); margin-top: 10px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>会議文字起こし</h1>
+  <div class="sub">Google Meet / Zoom などブラウザの会議タブの音声を、ブラウザ内Whisper(WebGPU)で文字起こしします。音声は外部に送信されません。</div>
+
+  <div class="warn" id="warnBrowser">このブラウザはタブ音声のキャプチャに対応していません。Chrome または Edge をご利用ください。</div>
+
+  <div class="card">
+    <div class="controls">
+      <label><input type="checkbox" id="srcTab" checked> タブ音声(相手)</label>
+      <label><input type="checkbox" id="srcMic" checked> マイク(自分)</label>
+      <label>モデル
+        <select id="model">
+          <option value="onnx-community/whisper-base">whisper-base(高速・軽量)</option>
+          <option value="onnx-community/whisper-small">whisper-small(高精度・重め)</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="optTranslate" checked> 日本語に翻訳</label>
+      <label>言語
+        <select id="language">
+          <option value="" selected>自動判定</option>
+          <option value="ja">日本語</option>
+          <option value="en">英語</option>
+          <option value="hi">ヒンディー語</option>
+        </select>
+      </label>
+    </div>
+    <div class="controls" style="margin-top:12px">
+      <button id="btnStart">文字起こしを開始</button>
+      <button id="btnStop">停止</button>
+      <button id="btnPreload">モデルを事前読み込み</button>
+      <button id="btnDownload" disabled>テキストを保存</button>
+      <button id="btnClear" disabled>クリア</button>
+    </div>
+    <div id="status"></div>
+    <div id="transStatus"></div>
+    <div id="progress"></div>
+    <div class="hint">
+      使い方: 「文字起こしを開始」→ 共有ダイアログで会議中の<b>タブ</b>を選び、<b>「タブの音声も共有する」に必ずチェック</b>してください。<br>
+      初回はモデルのダウンロード(数十MB〜)があります。会議前に「モデルを事前読み込み」を押しておくとスムーズです。
+    </div>
+  </div>
+
+  <div class="card">
+    <div id="transcript"><div class="empty">ここに文字起こし結果が表示されます</div></div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
