@@ -15,6 +15,21 @@ Google Meet / Zoom などブラウザで実施している会議のタブ音声�
 
 `getDisplayMedia` / WebGPU は secure context が必須のため、ローカルサーバーで配信します。
 
+### デスクトップのショートカットから(推奨)
+
+デスクトップの「会議文字起こしを起動」をダブルクリックすると、サーバーが起動して
+自動的にブラウザで開きます。サーバーを停止するには、開いた
+「Meeting Transcriber - close this window to stop」という名前のコンソールウィンドウを閉じてください。
+
+ショートカットが無い/再作成したい場合は `start-server.bat` をダブルクリックしても同じです。
+
+> Google Drive上のファイルは初回はWindowsに「インターネットからのファイル」として
+> ブロックされることがあります。その場合は `start-server.bat` を右クリック→
+> プロパティ→「許可する」にチェックするか、PowerShellで
+> `Unblock-File .\start-server.bat` を実行してください。
+
+### コマンドから
+
 ```
 npx -y serve -l 3333
 ```
