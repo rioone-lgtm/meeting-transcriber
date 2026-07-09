@@ -179,13 +179,29 @@ async function translateToJa(text) {
     if (!src || src === 'ja' || src === 'und') return null;
     const translator = await getTranslator(src);
     if (!translator) return null;
-    const ja = (await translator.translate(text)).trim();
+    let ja;
+    try {
+      ja = (await withTimeout(translator.translate(text), 15000)).trim();
+    } catch (err) {
+      // 翻訳器が途中でクラッシュ/ハングすることがあるため、
+      // 壊れたインスタンスは破棄して次回の呼び出しで作り直す
+      translators.delete(src);
+      reportTranslateIssue(src, err);
+      return null;
+    }
     return ja && ja !== text ? ja : null;
   } catch (err) {
     detectorPromise = null; // 言語検出の失敗は次回作り直す
     reportTranslateIssue('auto', err);
     return null;
   }
+}
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`timeout ${ms}ms`)), ms)),
+  ]);
 }
 
 // 言語パックのダウンロードにはユーザー操作(クリック)起点が必要な場合があるため、
@@ -199,7 +215,9 @@ function warmupTranslators() {
       return null;
     });
   }
-  const langs = new Set(['en', 'hi']);
+  // 使う見込みの高い言語だけ準備する。複数の言語パックを同時にロードすると
+  // メモリ圧迫で既存の翻訳器がクラッシュすることがあるため、無条件の追加はしない
+  const langs = new Set(['en']);
   const sel = el('language').value;
   if (sel && sel !== 'ja') langs.add(sel);
   for (const src of langs) getTranslator(src);
@@ -314,6 +332,29 @@ function onSegment({ source, audio, start }) {
   updateRunningStatus();
   worker.postMessage({ type: 'transcribe', id, audio, language: el('language').value }, [audio.buffer]);
 }
+
+// 訳が付かなかった確定行を定期的に再翻訳する(翻訳器クラッシュ後の回復用)。
+// 1行につき最大3回まで試す(日本語発話など訳が不要な行を無限に再試行しない)
+const RETRY_TRANSLATE_MS = 20000;
+let retryBusy = false;
+async function retryMissingTranslations() {
+  if (retryBusy || !canTranslate || !el('optTranslate').checked) return;
+  retryBusy = true;
+  try {
+    const missing = results.filter((r) => !r.translation && (r.translationTried || 0) < 3).slice(-5);
+    for (const entry of missing) {
+      entry.translationTried = (entry.translationTried || 0) + 1;
+      const ja = await translateToJa(entry.text);
+      if (ja && results.includes(entry)) {
+        entry.translation = ja;
+        renderTranscript();
+      }
+    }
+  } finally {
+    retryBusy = false;
+  }
+}
+setInterval(retryMissingTranslations, RETRY_TRANSLATE_MS);
 
 // 発話中のセグメントを定期的に途中まで認識して暫定表示する
 // (WASMは推論が遅く確定認識を圧迫するためWebGPU時のみ)
