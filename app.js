@@ -75,29 +75,20 @@ function ensureWorker() {
   worker = new Worker('worker.js', { type: 'module' });
   worker.onmessage = (e) => {
     const msg = e.data;
-    if (msg.type === 'progress') {
-      updateProgress(msg.file, msg.progress);
-    } else if (msg.type === 'loading') {
-      setStatus(msg.message);
-    } else if (msg.type === 'ready') {
+    if (msg.type === 'ready') {
       workerReady = true;
       loadedModel = el('model').value;
-      el('progress').innerHTML = '';
-      setStatus(`モデル読み込み完了(実行環境: ${msg.device})`);
-      el('btnStart').disabled = false;
-      el('btnPreload').disabled = false;
+      if (running) updateRunningStatus();
     } else if (msg.type === 'result') {
       onResult(msg);
     } else if (msg.type === 'error') {
       setStatus('エラー: ' + msg.message);
       el('btnStart').disabled = false;
-      el('btnPreload').disabled = false;
     }
   };
   worker.onerror = (e) => {
     setStatus('Workerエラー: ' + e.message);
     el('btnStart').disabled = false;
-    el('btnPreload').disabled = false;
   };
 }
 
@@ -106,23 +97,7 @@ function loadModel() {
   const model = el('model').value;
   if (workerReady && loadedModel === model) return;
   workerReady = false;
-  el('btnPreload').disabled = true;
-  setStatus('モデルを読み込んでいます…(初回は数十MBのダウンロードがあります)');
   worker.postMessage({ type: 'load', model });
-}
-
-const progressBars = new Map();
-function updateProgress(file, progress) {
-  if (!file) return;
-  let bar = progressBars.get(file);
-  if (!bar) {
-    const wrap = document.createElement('div');
-    wrap.innerHTML = `<div class="pname">${file}</div><div class="pbar"><div></div></div>`;
-    el('progress').appendChild(wrap);
-    bar = wrap.querySelector('.pbar > div');
-    progressBars.set(file, bar);
-  }
-  bar.style.width = `${Math.min(100, progress).toFixed(1)}%`;
 }
 
 // ---- 日本語への翻訳 (Chrome内蔵 Translator API / LanguageDetector API) ----
@@ -277,7 +252,8 @@ function renderTranscript() {
 }
 
 function onSegment({ source, audio, start }) {
-  if (!workerReady) return;
+  // モデル読み込み中でもWorker側のキューが load → transcribe の順で
+  // 直列処理するため、そのまま送って取りこぼしを防ぐ
   const id = nextId++;
   pending.set(id, { source, start });
   queueCount++;
@@ -396,7 +372,6 @@ function download() {
 // ---- 初期化 ----
 el('btnStart').addEventListener('click', start);
 el('btnStop').addEventListener('click', stop);
-el('btnPreload').addEventListener('click', () => { loadModel(); warmupTranslators(); });
 el('btnDownload').addEventListener('click', download);
 el('btnClear').addEventListener('click', clearTranscript);
 el('optTranslate').addEventListener('change', warmupTranslators);

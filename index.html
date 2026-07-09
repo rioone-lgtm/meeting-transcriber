@@ -22,13 +22,9 @@
   button:disabled { opacity: .5; cursor: not-allowed; }
   #btnStart { background: var(--accent); color: #fff; }
   #btnStop { background: #dc2626; color: #fff; display: none; }
-  #btnPreload, #btnDownload, #btnClear { background: #e2e8f0; color: var(--text); }
+  #btnDownload, #btnClear { background: #e2e8f0; color: var(--text); }
   #status { font-size: 13px; color: var(--sub); margin-top: 12px; min-height: 18px; white-space: pre-line; }
   #transStatus { font-size: 12px; color: #7c3aed; min-height: 16px; }
-  #progress { margin-top: 8px; }
-  .pbar { height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden; margin: 4px 0; }
-  .pbar > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
-  .pname { font-size: 11px; color: var(--sub); }
   #transcript { min-height: 200px; max-height: 55vh; overflow-y: auto; }
   .row { display: flex; gap: 8px; padding: 6px 4px; border-bottom: 1px solid var(--border); font-size: 14px; line-height: 1.6; }
   .row .time { color: var(--sub); font-size: 12px; flex-shrink: 0; padding-top: 2px; font-variant-numeric: tabular-nums; }
@@ -71,16 +67,14 @@
     <div class="controls" style="margin-top:12px">
       <button id="btnStart">文字起こしを開始</button>
       <button id="btnStop">停止</button>
-      <button id="btnPreload">モデルを事前読み込み</button>
       <button id="btnDownload" disabled>テキストを保存</button>
       <button id="btnClear" disabled>クリア</button>
     </div>
     <div id="status"></div>
     <div id="transStatus"></div>
-    <div id="progress"></div>
     <div class="hint">
       使い方: 「文字起こしを開始」→ 共有ダイアログで会議中の<b>タブ</b>を選び、<b>「タブの音声も共有する」に必ずチェック</b>してください。<br>
-      初回はモデルのダウンロード(数十MB〜)があります。会議前に「モデルを事前読み込み」を押しておくとスムーズです。
+      初回はモデルのダウンロードが裏で走るため、認識が始まるまで少し時間がかかることがあります。
     </div>
   </div>
 
