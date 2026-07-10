@@ -164,7 +164,50 @@ function getTranslator(src) {
   return p;
 }
 
-async function translateToJa(text) {
+// 長文を一度に渡すとChrome内蔵翻訳が後半を省略することがあるため、
+// 句読点で分割して順に翻訳する。Whisperの中国語出力のように句読点が
+// 無い場合は、読点・スペース・固定長で強制的に区切る
+function isMostlyCjk(text) {
+  return (text.match(/[　-鿿＀-￯]/g) || []).length > text.length / 2;
+}
+
+function splitForTranslation(text) {
+  const maxLen = isMostlyCjk(text) ? 30 : 150;
+  if (text.length <= maxLen) return [text];
+  const parts = text.split(/(?<=[。．.!?！?;;])/);
+  const chunks = [];
+  let cur = '';
+  const push = () => { if (cur.trim()) chunks.push(cur); cur = ''; };
+  for (const p of parts) {
+    if (cur && (cur + p).length > maxLen) push();
+    cur += p;
+    while (cur.length > maxLen) {
+      let cut = -1;
+      for (const d of ['、', ',', ',', ' ']) cut = Math.max(cut, cur.lastIndexOf(d, maxLen));
+      cut = cut >= maxLen * 0.4 ? cut + 1 : maxLen; // 区切りが手前すぎるときは固定長で切る
+      chunks.push(cur.slice(0, cut));
+      cur = cur.slice(cut);
+    }
+  }
+  push();
+  return chunks;
+}
+
+// 1チャンクを翻訳し、訳が入力より明らかに短い場合(CJK→日本語は通常
+// 同等以上の長さになるため、省略の疑いが強い)は半分に割って訳し直す
+async function translateChunk(translator, piece, depth = 0) {
+  const ja = (await withTimeout(translator.translate(piece), 15000)).trim();
+  if (isMostlyCjk(piece) && depth < 2 && piece.length >= 16 && ja.length < piece.length * 0.7) {
+    const mid = Math.ceil(piece.length / 2);
+    const a = await translateChunk(translator, piece.slice(0, mid), depth + 1);
+    const b = await translateChunk(translator, piece.slice(mid), depth + 1);
+    return a + b;
+  }
+  return ja;
+}
+
+// quick=true(暫定表示用)は分割せず1回で翻訳する(負荷を抑える。確定時に完全な訳に置き換わる)
+async function translateToJa(text, quick = false) {
   if (!canTranslate) return null;
   try {
     // 言語が明示指定されていればそれを翻訳元に使い、自動判定のときだけ言語検出する
@@ -177,11 +220,18 @@ async function translateToJa(text) {
       src = top?.detectedLanguage;
     }
     if (!src || src === 'ja' || src === 'und') return null;
+    src = translatorLangCode(src);
     const translator = await getTranslator(src);
     if (!translator) return null;
-    let ja;
+    const pieces = quick ? [text] : splitForTranslation(text);
+    const out = [];
     try {
-      ja = (await withTimeout(translator.translate(text), 15000)).trim();
+      for (const piece of pieces) {
+        const ja = quick
+          ? (await withTimeout(translator.translate(piece), 15000)).trim()
+          : await translateChunk(translator, piece);
+        if (ja) out.push(ja);
+      }
     } catch (err) {
       // 翻訳器が途中でクラッシュ/ハングすることがあるため、
       // 壊れたインスタンスは破棄して次回の呼び出しで作り直す
@@ -189,12 +239,19 @@ async function translateToJa(text) {
       reportTranslateIssue(src, err);
       return null;
     }
-    return ja && ja !== text ? ja : null;
+    const joined = out.join(''); // 訳文は日本語なので区切りなしで結合してよい
+    return joined && joined !== text ? joined : null;
   } catch (err) {
     detectorPromise = null; // 言語検出の失敗は次回作り直す
     reportTranslateIssue('auto', err);
     return null;
   }
+}
+
+// Chrome翻訳APIは中国語をスクリプト(簡体字/繁体字)まで区別するが、
+// Whisperの言語コードはスクリプトを区別しない 'zh' なので、既定で簡体字に読み替える
+function translatorLangCode(code) {
+  return code === 'zh' ? 'zh-Hans' : code;
 }
 
 function withTimeout(promise, ms) {
@@ -219,7 +276,7 @@ function warmupTranslators() {
   // メモリ圧迫で既存の翻訳器がクラッシュすることがあるため、無条件の追加はしない
   const langs = new Set(['en']);
   const sel = el('language').value;
-  if (sel && sel !== 'ja') langs.add(sel);
+  if (sel && sel !== 'ja') langs.add(translatorLangCode(sel));
   for (const src of langs) getTranslator(src);
 }
 
@@ -242,7 +299,7 @@ function onResult({ id, text, error }) {
       interimShown.set(meta.source, entry);
       renderTranscript();
       if (el('optTranslate').checked) {
-        translateToJa(text).then((ja) => {
+        translateToJa(text, true).then((ja) => {
           // 確定・更新で置き換わっていた場合は適用しない
           if (ja && interimShown.get(meta.source) === entry) {
             entry.translation = ja;
